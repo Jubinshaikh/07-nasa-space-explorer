@@ -12,9 +12,6 @@ const fetchButton = document.querySelector('.filters button');
 const gallery = document.getElementById('gallery');
 const spaceFactText = document.getElementById('spaceFact');
 
-// Track request order so only the newest search updates the gallery.
-let latestRequestId = 0;
-
 // Random fact list for the "Did You Know?" section
 const spaceFacts = [
 	'The Sun holds about 99.8% of all the mass in our solar system.',
@@ -28,9 +25,6 @@ const spaceFacts = [
 	'Mars has the largest volcano in the solar system, Olympus Mons.',
 	'The Milky Way galaxy is so large that light takes about 100,000 years to cross it.'
 ];
-
-// Store the current gallery items so we can open modal details by index.
-let currentGalleryItems = [];
 
 // Create a modal once and reuse it whenever a gallery item is clicked.
 const modal = document.createElement('div');
@@ -57,7 +51,67 @@ const modalExplanation = modal.querySelector('.modal-explanation');
 // Show one random fact when the page loads.
 showRandomFact();
 
-// Helper: set a random space fact in the fact section
+const appState = {
+	latestRequestId: 0,
+	currentGalleryItems: []
+};
+
+const STATUS_UI = {
+	defaultTitles: {
+		loading: 'Loading space images',
+		error: 'Something went wrong',
+		empty: 'No results yet'
+	},
+	icons: {
+		error: '!',
+		empty: 'i'
+	},
+	roles: {
+		loading: 'status',
+		error: 'alert',
+		empty: 'status'
+	}
+};
+
+const FALLBACK_TEXT = {
+	title: 'Untitled NASA APOD entry',
+	date: 'Unknown date',
+	explanation: 'No explanation was provided by NASA for this entry.'
+};
+
+const STATUS_MESSAGES = {
+	missingDates: {
+		title: 'Select a complete date range',
+		type: 'empty',
+		message: 'Choose both a start and end date to begin exploring NASA\'s daily astronomy archive.'
+	},
+	invalidOrder: {
+		title: 'Check your date order',
+		type: 'error',
+		message: 'Start date should be before or the same as end date. Adjust the range and try again.'
+	},
+	loading: {
+		title: 'Scanning the cosmos',
+		type: 'loading',
+		message: 'Contacting NASA and preparing your gallery. This can take a few seconds.'
+	},
+	noEntries: {
+		title: 'No entries found for these dates',
+		type: 'empty',
+		message: 'NASA did not return any APOD entries for that range. Try different dates to continue exploring.'
+	},
+	noDisplayableMedia: {
+		title: 'Nothing displayable yet',
+		type: 'empty',
+		message: 'The returned entries could not be displayed as images or videos. Try a nearby date range.'
+	},
+	loadErrorPrefix: 'We couldn\'t load NASA images right now.'
+};
+
+// =====================
+// Basic UI helpers
+// =====================
+
 function showRandomFact() {
 	if (!spaceFactText) {
 		return;
@@ -67,7 +121,34 @@ function showRandomFact() {
 	spaceFactText.textContent = spaceFacts[randomIndex];
 }
 
-// Helper: simple check for video URLs we can usually embed in an iframe
+function showStatusMessage(message, type = 'empty', title = '') {
+	if (!gallery) {
+		return;
+	}
+
+	const safeType = ['loading', 'error', 'empty'].includes(type) ? type : 'empty';
+	const safeTitle = title || STATUS_UI.defaultTitles[safeType];
+	const iconMarkup = safeType === 'loading'
+		? '<div class="status-spinner" aria-hidden="true"></div>'
+		: `<div class="status-icon" aria-hidden="true">${STATUS_UI.icons[safeType] || 'i'}</div>`;
+
+	gallery.innerHTML = `
+		<div class="status-card status-${safeType}" role="${STATUS_UI.roles[safeType]}" aria-live="polite">
+			${iconMarkup}
+			<p class="status-title">${safeTitle}</p>
+			<p class="status-text">${message}</p>
+		</div>
+	`;
+}
+
+function showPresetStatus(statusPreset) {
+	showStatusMessage(statusPreset.message, statusPreset.type, statusPreset.title);
+}
+
+// =====================
+// Video URL helpers
+// =====================
+
 function canEmbedVideo(url) {
 	if (!url) {
 		return false;
@@ -81,24 +162,20 @@ function canEmbedVideo(url) {
 	);
 }
 
-// Helper: convert known video URLs into iframe-friendly embed URLs
 function getEmbedVideoUrl(url) {
 	if (!url) {
 		return null;
 	}
 
-	// Already an embed link
 	if (url.includes('/embed/') || url.includes('player.vimeo.com/video/')) {
 		return url;
 	}
 
-	// youtu.be/VIDEO_ID -> youtube embed URL
 	if (url.includes('youtu.be/')) {
 		const videoId = url.split('youtu.be/')[1]?.split('?')[0];
 		return videoId ? `https://www.youtube.com/embed/${videoId}` : null;
 	}
 
-	// youtube watch URL -> youtube embed URL
 	if (url.includes('youtube.com/watch')) {
 		const queryString = url.split('?')[1] || '';
 		const params = new URLSearchParams(queryString);
@@ -106,7 +183,6 @@ function getEmbedVideoUrl(url) {
 		return videoId ? `https://www.youtube.com/embed/${videoId}` : null;
 	}
 
-	// vimeo.com/VIDEO_ID -> vimeo player URL
 	if (url.includes('vimeo.com/') && !url.includes('player.vimeo.com')) {
 		const videoId = url.split('vimeo.com/')[1]?.split('?')[0];
 		return videoId ? `https://player.vimeo.com/video/${videoId}` : null;
@@ -115,123 +191,16 @@ function getEmbedVideoUrl(url) {
 	return canEmbedVideo(url) ? url : null;
 }
 
-// Helper: show a status message inside the gallery area
-function showStatusMessage(message) {
-	if (!gallery) {
-		return;
-	}
+// =====================
+// Data shaping helpers
+// =====================
 
-	gallery.innerHTML = `
-		<div class="placeholder">
-			<div class="placeholder-icon">*</div>
-			<p>${message}</p>
-		</div>
-	`;
-}
-
-// Helper: create gallery media section for image or video APOD entries.
-function createGalleryMedia(item) {
-	const safeTitle = item.title || 'Space media';
-
-	if (item.media_type === 'image') {
-		return `
-			<div class="gallery-media">
-				<img src="${item.url}" alt="${safeTitle}" />
-			</div>
-		`;
-	}
-
-	const embedUrl = getEmbedVideoUrl(item.url);
-
-	if (embedUrl) {
-		return `
-			<div class="gallery-media">
-				<iframe
-					src="${embedUrl}"
-					title="${safeTitle}"
-					loading="lazy"
-					allowfullscreen
-				></iframe>
-			</div>
-		`;
-	}
-
-	const thumbnailMarkup = item.thumbnail_url
-		? `<img src="${item.thumbnail_url}" alt="${safeTitle}" />`
-		: '<div class="video-fallback">Preview unavailable in NASA feed</div>';
-
-	return `
-		<div class="gallery-media">
-			${thumbnailMarkup}
-		</div>
-		<p><a class="video-link" href="${item.url}" target="_blank" rel="noopener noreferrer">Watch Video</a></p>
-	`;
-}
-
-// Helper: create one gallery card from APOD data
-function createGalleryItem(item, index) {
-	const mediaMarkup = createGalleryMedia(item);
-	const safeTitle = item.title || 'Untitled NASA APOD entry';
-	const safeDate = item.date || 'Unknown date';
-
-	return `
-		<article class="gallery-item" data-index="${index}" tabindex="0">
-			${mediaMarkup}
-			<p><strong>${safeTitle}</strong></p>
-			<p>${safeDate}</p>
-		</article>
-	`;
-}
-
-// Open modal and fill it with the selected APOD item details.
-function openModal(item) {
-	const largeImageUrl = item.hdurl || item.url;
-	const embedUrl = getEmbedVideoUrl(item.url);
-	const safeTitle = item.title || 'Untitled NASA APOD entry';
-	const safeDate = item.date || 'Unknown date';
-	const safeExplanation = item.explanation || 'No explanation was provided by NASA for this entry.';
-
-	if (item.media_type === 'video' && embedUrl) {
-		modalMedia.innerHTML = `
-			<iframe
-				src="${embedUrl}"
-				title="${safeTitle}"
-				loading="lazy"
-				allowfullscreen
-			></iframe>
-		`;
-	} else if (item.media_type === 'video') {
-		const thumbnailMarkup = item.thumbnail_url
-			? `<img src="${item.thumbnail_url}" alt="${safeTitle}" />`
-			: '<div class="video-fallback">Preview unavailable in NASA feed</div>';
-
-		modalMedia.innerHTML = `
-			${thumbnailMarkup}
-			<p><a class="video-link" href="${item.url}" target="_blank" rel="noopener noreferrer">Watch Video</a></p>
-		`;
-	} else {
-		modalMedia.innerHTML = `<img src="${largeImageUrl}" alt="${safeTitle}" />`;
-	}
-
-	modalTitle.textContent = safeTitle;
-	modalDate.textContent = safeDate;
-	modalExplanation.textContent = safeExplanation;
-
-	modal.classList.remove('hidden');
-	document.body.classList.add('modal-open');
-}
-
-// Close modal and clean up media so videos stop playing.
-function closeModal() {
-	modal.classList.add('hidden');
-	document.body.classList.remove('modal-open');
-	modalMedia.innerHTML = '';
-}
-
-// Helper: ensure APOD data is always an array sorted oldest -> newest
 function normalizeApodData(data) {
 	const items = Array.isArray(data) ? data : [data];
-	const validItems = items.filter((item) => item && typeof item === 'object' && typeof item.date === 'string');
+
+	const validItems = items.filter((item) => {
+		return item && typeof item === 'object' && typeof item.date === 'string';
+	});
 
 	return validItems.sort((a, b) => {
 		if (a.date < b.date) return -1;
@@ -240,7 +209,162 @@ function normalizeApodData(data) {
 	});
 }
 
-// Fetch and render images for the selected date range
+function getDisplayableItems(items) {
+	return items.filter((item) => {
+		if (item.media_type === 'image') {
+			return Boolean(item.url);
+		}
+
+		if (item.media_type === 'video') {
+			return Boolean(item.url);
+		}
+
+		return false;
+	});
+}
+
+function getCardMetadata(item) {
+	return {
+		title: item.title || FALLBACK_TEXT.title,
+		date: item.date || FALLBACK_TEXT.date,
+		explanation: item.explanation || FALLBACK_TEXT.explanation,
+		mediaTypeLabel: item.media_type === 'video' ? 'Video' : 'Image'
+	};
+}
+
+// =====================
+// Rendering helpers
+// =====================
+
+function createVideoFallbackMarkup(item, safeTitle) {
+	const thumbnailMarkup = item.thumbnail_url
+		? `<img src="${item.thumbnail_url}" alt="${safeTitle}" />`
+		: '<div class="video-fallback">Preview unavailable in NASA feed</div>';
+
+	return `
+		${thumbnailMarkup}
+		<p><a class="video-link" href="${item.url}" target="_blank" rel="noopener noreferrer">Watch Video</a></p>
+	`;
+}
+
+function createMediaMarkup(item, options = {}) {
+	const safeTitle = item.title || 'Space media';
+	const embedUrl = getEmbedVideoUrl(item.url);
+	const useLargeImage = options.useLargeImage === true;
+
+	if (item.media_type === 'image') {
+		const imageUrl = useLargeImage ? (item.hdurl || item.url) : item.url;
+		return `<img src="${imageUrl}" alt="${safeTitle}" />`;
+	}
+
+	if (embedUrl) {
+		return `
+			<iframe
+				src="${embedUrl}"
+				title="${safeTitle}"
+				loading="lazy"
+				allowfullscreen
+			></iframe>
+		`;
+	}
+
+	return createVideoFallbackMarkup(item, safeTitle);
+}
+
+function createGalleryCardMarkup(item, index) {
+	const metadata = getCardMetadata(item);
+	const mediaMarkup = createMediaMarkup(item);
+
+	return `
+		<article
+			class="gallery-item"
+			data-index="${index}"
+			tabindex="0"
+			role="button"
+			aria-label="Open details for ${metadata.title} from ${metadata.date}"
+		>
+			<div class="gallery-media">
+				${mediaMarkup}
+			</div>
+			<div class="gallery-body">
+				<p class="media-type-badge">${metadata.mediaTypeLabel}</p>
+				<h3 class="gallery-title">${metadata.title}</h3>
+				<p class="gallery-date">${metadata.date}</p>
+			</div>
+		</article>
+	`;
+}
+
+function renderGalleryItems(items) {
+	if (!gallery) {
+		return;
+	}
+
+	gallery.innerHTML = items.map((item, index) => createGalleryCardMarkup(item, index)).join('');
+}
+
+// =====================
+// Modal helpers
+// =====================
+
+function openModal(item) {
+	const metadata = getCardMetadata(item);
+
+	modalMedia.innerHTML = createMediaMarkup(item, { useLargeImage: true });
+	modalTitle.textContent = metadata.title;
+	modalDate.textContent = metadata.date;
+	modalExplanation.textContent = metadata.explanation;
+
+	modal.classList.remove('hidden');
+	document.body.classList.add('modal-open');
+}
+
+function closeModal() {
+	modal.classList.add('hidden');
+	document.body.classList.remove('modal-open');
+	modalMedia.innerHTML = '';
+}
+
+function openModalFromCard(cardElement) {
+	const index = Number(cardElement.dataset.index);
+	const selectedItem = appState.currentGalleryItems[index];
+
+	if (selectedItem) {
+		openModal(selectedItem);
+	}
+}
+
+// =====================
+// API and request flow
+// =====================
+
+function validateDateRange(startDate, endDate) {
+	if (!startDate || !endDate) {
+		return { valid: false, status: STATUS_MESSAGES.missingDates };
+	}
+
+	if (startDate > endDate) {
+		return { valid: false, status: STATUS_MESSAGES.invalidOrder };
+	}
+
+	return { valid: true };
+}
+
+function buildApodRequestUrl(startDate, endDate) {
+	return `${APOD_URL}?api_key=${API_KEY}&start_date=${startDate}&end_date=${endDate}&thumbs=true`;
+}
+
+async function fetchApodRange(startDate, endDate) {
+	const requestUrl = buildApodRequestUrl(startDate, endDate);
+	const response = await fetch(requestUrl);
+
+	if (!response.ok) {
+		throw new Error(`NASA API request failed with status ${response.status}.`);
+	}
+
+	return response.json();
+}
+
 async function loadSpaceImages() {
 	if (!startInput || !endInput || !fetchButton || !gallery) {
 		console.error('NASA Space Explorer: required DOM elements are missing.');
@@ -249,92 +373,68 @@ async function loadSpaceImages() {
 
 	const startDate = startInput.value;
 	const endDate = endInput.value;
+	const dateCheck = validateDateRange(startDate, endDate);
 
-	// Basic date validation before making the request
-	if (!startDate || !endDate) {
-		showStatusMessage('Please select both a start date and an end date.');
+	if (!dateCheck.valid) {
+		showPresetStatus(dateCheck.status);
 		return;
 	}
 
-	if (startDate > endDate) {
-		showStatusMessage('Start date must be before or equal to end date.');
-		return;
-	}
-
-	const requestId = ++latestRequestId;
+	const requestId = ++appState.latestRequestId;
 	fetchButton.disabled = true;
 	closeModal();
-	showStatusMessage('Loading space images...');
+	showPresetStatus(STATUS_MESSAGES.loading);
 
 	try {
-		// thumbs=true asks APOD for thumbnail images when media is a video
-		const requestUrl = `${APOD_URL}?api_key=${API_KEY}&start_date=${startDate}&end_date=${endDate}&thumbs=true`;
-		const response = await fetch(requestUrl);
-
-		if (!response.ok) {
-			throw new Error(`NASA API request failed with status ${response.status}.`);
-		}
-
-		const rawData = await response.json();
+		const rawData = await fetchApodRange(startDate, endDate);
 		const normalizedData = normalizeApodData(rawData);
 
-		// If the user already started a newer request, ignore this result.
-		if (requestId !== latestRequestId) {
+		// Only apply results if this is still the newest request.
+		if (requestId !== appState.latestRequestId) {
 			return;
 		}
 
 		if (normalizedData.length === 0) {
-			showStatusMessage('NASA returned no valid entries for that date range.');
+			showPresetStatus(STATUS_MESSAGES.noEntries);
 			return;
 		}
 
-		// Keep only items that have required media data.
-		const displayableItems = normalizedData.filter((item) => {
-			if (item.media_type === 'image') {
-				return Boolean(item.url);
-			}
-
-			if (item.media_type === 'video') {
-				return Boolean(item.url);
-			}
-
-			return false;
-		});
+		const displayableItems = getDisplayableItems(normalizedData);
 
 		if (displayableItems.length === 0) {
-			showStatusMessage('No displayable APOD items were found for this date range.');
+			showPresetStatus(STATUS_MESSAGES.noDisplayableMedia);
 			return;
 		}
 
-		// Requirement: render only 9 items when more are returned.
-		// Data is already normalized to chronological order.
-		const nineItems = displayableItems.slice(0, 9);
-		currentGalleryItems = nineItems;
-
-		gallery.innerHTML = nineItems.map((item, index) => createGalleryItem(item, index)).join('');
+		const limitedItems = displayableItems.slice(0, 9);
+		appState.currentGalleryItems = limitedItems;
+		renderGalleryItems(limitedItems);
 	} catch (error) {
-		if (requestId !== latestRequestId) {
+		if (requestId !== appState.latestRequestId) {
 			return;
 		}
 
-		showStatusMessage(`Could not load NASA images. ${error.message}`);
+		showStatusMessage(
+			`${STATUS_MESSAGES.loadErrorPrefix} ${error.message} Please try again in a moment.`,
+			'error',
+			'Unable to load your gallery'
+		);
 	} finally {
-		if (requestId === latestRequestId && fetchButton) {
+		if (requestId === appState.latestRequestId) {
 			fetchButton.disabled = false;
 		}
 	}
 }
 
-// Set up interactions only if required DOM elements exist.
-if (!startInput || !endInput || !fetchButton || !gallery) {
-	console.error('NASA Space Explorer: required DOM elements are missing.');
-} else {
-	setupDateInputs(startInput, endInput);
-	fetchButton.addEventListener('click', loadSpaceImages);
-}
+// =====================
+// Event wiring
+// =====================
 
-if (gallery) {
-	// Open modal when user clicks a gallery item.
+function setupGalleryEvents() {
+	if (!gallery) {
+		return;
+	}
+
 	gallery.addEventListener('click', (event) => {
 		if (event.target.closest('.video-link')) {
 			return;
@@ -346,15 +446,9 @@ if (gallery) {
 			return;
 		}
 
-		const index = Number(clickedCard.dataset.index);
-		const selectedItem = currentGalleryItems[index];
-
-		if (selectedItem) {
-			openModal(selectedItem);
-		}
+		openModalFromCard(clickedCard);
 	});
 
-	// Keyboard support for opening modal from focused gallery items.
 	gallery.addEventListener('keydown', (event) => {
 		if (event.key !== 'Enter' && event.key !== ' ') {
 			return;
@@ -367,21 +461,31 @@ if (gallery) {
 		}
 
 		event.preventDefault();
-		const index = Number(focusedCard.dataset.index);
-		const selectedItem = currentGalleryItems[index];
+		openModalFromCard(focusedCard);
+	});
+}
 
-		if (selectedItem) {
-			openModal(selectedItem);
+function setupModalEvents() {
+	modalCloseButton.addEventListener('click', closeModal);
+	modalOverlay.addEventListener('click', closeModal);
+
+	document.addEventListener('keydown', (event) => {
+		if (event.key === 'Escape' && !modal.classList.contains('hidden')) {
+			closeModal();
 		}
 	});
 }
 
-// Ways to close the modal: close button, click outside, and Escape key.
-modalCloseButton.addEventListener('click', closeModal);
-modalOverlay.addEventListener('click', closeModal);
-
-document.addEventListener('keydown', (event) => {
-	if (event.key === 'Escape' && !modal.classList.contains('hidden')) {
-		closeModal();
+function initializeApp() {
+	if (!startInput || !endInput || !fetchButton || !gallery) {
+		console.error('NASA Space Explorer: required DOM elements are missing.');
+		return;
 	}
-});
+
+	setupDateInputs(startInput, endInput);
+	fetchButton.addEventListener('click', loadSpaceImages);
+	setupGalleryEvents();
+	setupModalEvents();
+}
+
+initializeApp();
